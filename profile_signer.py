@@ -5,7 +5,6 @@ import subprocess
 import os
 import sys
 import tempfile
-import base64
 from Foundation import NSPropertyListSerialization, NSData, NSPropertyListXMLFormat_v1_0, NSPropertyListMutableContainers
 
 #Copied from FoundationPlist
@@ -112,9 +111,12 @@ def main():
     parser.add_argument('infile', help='Path to input .mobileconfig file')
     parser.add_argument('outfile', help='Path to output .mobileconfig file. Defaults to outputting into the same directory.')
     args = parser.parse_args()
-    print "fuck yeah"
     
     if args.sign == 'encrypt' or args.sign == 'both':
+        if args.sign == 'both':
+            outputFile = args.outfile + '_unsigned'
+        else:
+            outputFile = args.outfile
         # encrypt the profile only, do not sign
         # Encrypting a profile:
         # 1. Extract payload content into its own file
@@ -129,7 +131,7 @@ def main():
 
         # Step 2: Serialize that file into its own plist
         (pContentFile, pContentPath) = tempfile.mkstemp()
-        print "pContentPath: %s" % pContentPath
+        #print "pContentPath: %s" % pContentPath
         writePlist(payloadContent, pContentPath)
         
         # Step 3: Use openssl to encrypt that content
@@ -143,8 +145,8 @@ def main():
             print >> sys.stderr, "Error: %s" % serr
             sys.exit(1)
         # Now write the certificate to a temp file
-        (certfile, certpath) = tempfile.mkstemp('.pem')
-        print "Certpath: %s" % certpath
+        (certfile, certpath) = tempfile.mkstemp('.der')
+        #print "Certpath: %s" % certpath
         try:
             with open(certpath, 'wb') as f:
                 f.write(sout)
@@ -153,8 +155,8 @@ def main():
             sys.exit(1)      
         # Now use openssl to encrypt the payload content using that certificate
         (encPContentfile, encPContentPath) = tempfile.mkstemp('.plist')
-        print "encPContentPath: %s" % encPContentPath
-        enc_cmd = ['/usr/bin/openssl', 'smime', '-encrypt', '-aes256', '-outform', 'pem', 
+        #print "encPContentPath: %s" % encPContentPath
+        enc_cmd = ['/usr/bin/openssl', 'smime', '-encrypt', '-aes256', '-outform', 'der', 
                 '-in', pContentPath, '-out', encPContentPath]
         enc_cmd += [certpath]
         proc = subprocess.Popen(enc_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -166,18 +168,14 @@ def main():
         
         # Step 4: Add the new encrypted payload content back into the plist
         with open(encPContentPath, 'rb') as f:
-            content = f.readlines()
-            content = content[1:-1] #this is to skip the ---BEGIN PKCS7--- and ----END PKCS7---- lines
-        encPayload = ""
-        for line in content:
-            encPayload += ''.join(line.rstrip()) # to get rid of Python's \n everywhere
+            binaryEncPayload = f.read()
         del myProfile['PayloadContent']
-
-        binaryEncPayload = base64.b64decode(encPayload)
         wrapped_data = NSData.dataWithBytes_length_(binaryEncPayload, len(binaryEncPayload))
         myProfile['EncryptedPayloadContent'] = wrapped_data
+
+        # Step 5: Replace the plist with the new content
         plistData, error = NSPropertyListSerialization.dataFromPropertyList_format_errorDescription_(myProfile, NSPropertyListXMLFormat_v1_0, None)
-        plistData.writeToFile_atomically_(args.outfile, True)
+        plistData.writeToFile_atomically_(outputFile, True)
 
         # Now clean up after ourselves
         os.remove(pContentPath)
@@ -189,12 +187,19 @@ def main():
         if not args.name:
             print >> sys.stderr, 'Error: A certificate common name is required to sign profiles with the Keychain.'
             sys.exit(22)
-        cmd = ['/usr/bin/security', 'cms', '-S', '-N', args.name, '-i', args.infile, '-o', args.outfile ]
+        if args.sign == 'both':
+            # If we already encrypted it, then the correct file is already in outputFile
+            inputFile = outputFile
+        else:
+            inputFile = args.infile
+        cmd = ['/usr/bin/security', 'cms', '-S', '-N', args.name, '-i', inputFile, '-o', args.outfile ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         (sout, serr) = proc.communicate()
         if serr:
             print >> sys.stderr, 'Error: %s' % serr
             sys.exit(1)
+        if args.sign == 'both':
+            os.remove(outputFile)
         
 if __name__ == '__main__':
     main()
